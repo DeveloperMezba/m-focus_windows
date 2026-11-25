@@ -1611,8 +1611,17 @@ class Main(QWidget):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setWindowTitle("M Focus")
-        self.setMinimumSize(980, 660)
-        self.resize(1120, 740)
+        # keep the window inside the screen: on small / scaled laptop screens a fixed 980x660
+        # minimum is taller than the usable area and pushes the title bar and taskbar away
+        scr = QApplication.primaryScreen()
+        av = scr.availableGeometry() if scr else None
+        mw, mh = (min(980, av.width() - 24), min(660, av.height() - 48)) if av else (980, 660)
+        self.setMinimumSize(max(mw, 640), max(mh, 480))
+        self.resize(max(self.minimumWidth(), min(1120, av.width() - 24) if av else 1120),
+                    max(self.minimumHeight(), min(740, av.height() - 48) if av else 740))
+        if av:
+            self.move(av.x() + max(0, (av.width() - self.width()) // 2),
+                      av.y() + max(0, (av.height() - self.height()) // 2))
         self.icon = app_icon()
         self.setWindowIcon(self.icon)
         self.conf = conf

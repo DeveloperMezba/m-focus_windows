@@ -43,6 +43,10 @@ NEVER_KILL = {"system", "smss", "csrss", "wininit", "winlogon", "services", "lsa
               "registry", "idle", "conhost", "msmpeng", "searchhost", "startmenuexperiencehost"}
 NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW
 TESTING = bool(os.environ.get("MFOCUS_TEST"))
+# programs that could be used to stop the session: closed during every focus phase
+TASK_TOOLS = ["taskmgr", "resmon", "procexp", "procexp64", "procexp64a", "processhacker",
+              "systeminformer"]
+TASKMGR_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
 
 
 # ---------------------------------------------------------------- small helpers
@@ -223,6 +227,35 @@ def kill_apps(apps, procs=None, terminate=None):
     return killed
 
 
+def taskmgr_policy(disable):
+    """While a focus phase runs, Windows refuses to open Task Manager ("disabled by your
+    administrator"). Only removes the policy if we were the ones who set it."""
+    if TESTING or os.name != "nt":
+        return
+    try:
+        import winreg
+        marker = DATA / "taskmgr.marker"
+        key = winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, TASKMGR_KEY, 0,
+                                 winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE | winreg.KEY_WOW64_64KEY)
+        try:
+            try:
+                cur = winreg.QueryValueEx(key, "DisableTaskMgr")[0]
+            except FileNotFoundError:
+                cur = None
+            if disable:
+                if cur != 1:
+                    marker.write_text("1")
+                    winreg.SetValueEx(key, "DisableTaskMgr", 0, winreg.REG_DWORD, 1)
+            elif marker.exists():
+                if cur == 1:
+                    winreg.DeleteValue(key, "DisableTaskMgr")
+                marker.unlink()
+        finally:
+            winreg.CloseKey(key)
+    except Exception as e:
+        log("taskmgr policy failed: %r" % (e,))
+
+
 # ---------------------------------------------------------------- phases / history
 def current_phase(state, now):
     for i, ph in enumerate(state["phases"]):
@@ -250,6 +283,7 @@ class Enforcer:
         self.key = None      # which session the in-memory counters belong to
         self.acc = {}        # observed focus seconds per phase index
         self.rec = []        # phases already written to history
+        self.tm = None       # whether Task Manager is currently disabled by us
 
     def tick(self, now=None, kill=None):
         """One pass. Returns True while a session is still active."""
@@ -261,6 +295,8 @@ class Enforcer:
         if not isinstance(state, dict) or not isinstance(state.get("phases"), list):
             if BEGIN in text:
                 write_hosts(strip_block(text))
+            taskmgr_policy(False)
+            self.tm = False
             return False
 
         if state.get("start") != self.key:   # new session (or enforcer restarted)
@@ -287,14 +323,19 @@ class Enforcer:
             want = strip_block(text) if BEGIN in text else text
         if want != text:
             write_hosts(want)
+        if blocking != self.tm:
+            taskmgr_policy(blocking)
+            self.tm = blocking
         if blocking:
-            kill_apps(state.get("apps", []), terminate=kill)
+            kill_apps(list(state.get("apps", [])) + TASK_TOOLS, terminate=kill)
 
         if state.get("end", 0) <= now:
             try:
                 os.remove(str(STATE))
             except FileNotFoundError:
                 pass
+            taskmgr_policy(False)
+            self.tm = False
             return False
         if dirty:
             write_json(STATE, state)
